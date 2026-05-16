@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck-test:
+    name: lint / type-check / unit-test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
+
+      - name: Sync dev dependencies
+        run: uv sync --extra dev --python ${{ matrix.python }}
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: mypy --strict
+        run: uv run mypy
+
+      - name: pytest (unit)
+        run: uv run pytest tests/unit -v
+
+  integration-demo:
+    name: integration (demo)
+    runs-on: ubuntu-latest
+    needs: lint-typecheck-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dev dependencies
+        run: uv sync --extra dev --python 3.12
+
+      - name: Run demo integration tests
+        env:
+          ETORO_DEMO_API_KEY: ${{ secrets.ETORO_DEMO_API_KEY }}
+          ETORO_DEMO_USER_KEY: ${{ secrets.ETORO_DEMO_USER_KEY }}
+        run: uv run pytest tests/integration -v -m integration
