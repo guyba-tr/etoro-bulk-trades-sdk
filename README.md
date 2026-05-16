@@ -135,7 +135,7 @@ twice with different `env` values raises.
 | Method | Purpose |
 |---|---|
 | `open_trade(intent)` | Single open by amount or by units (exactly one). |
-| `close_trade(intent)` | Full or partial close by `position_id`. |
+| `close_trade(intent)` | Full or partial close by `position_id` + `instrument_id`. |
 | `execute_bulk_trade(plan)` | Multi-position open from one cash pool, weight-based. |
 | `rebalance(plan)` | Two-phase close-then-open to a target allocation. |
 

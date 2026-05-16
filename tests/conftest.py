@@ -1,8 +1,13 @@
-"""Shared pytest fixtures and configuration."""
+"""Shared pytest fixtures and configuration.
+
+NOTE: the ``_no_real_sleep`` autouse fixture deliberately lives in
+``tests/unit/conftest.py`` — **not** here — so that integration tests
+(which actually need real sleeps to wait through eToro's PnL cache
+window) are not silently short-circuited.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -51,7 +56,7 @@ def pnl_fixture() -> dict[str, Any]:
         "mirrors": [
             {
                 "mirrorID": 99,
-                "userId": 12345,
+                "CID": 12345,
                 "availableAmount": 2000.00,
                 "closedPositionsNetProfit": 50.00,
                 "positions": [
@@ -86,21 +91,3 @@ def pnl_fixture() -> dict[str, Any]:
             },
         ],
     }
-
-
-@pytest.fixture(autouse=True)
-def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Make ``asyncio.sleep`` and ``time.sleep`` instantaneous in unit tests
-    so we don't accidentally wait on real time."""
-    import asyncio
-    import time
-
-    async def _instant_async_sleep(delay: float, result: Any = None) -> Any:
-        return result
-
-    def _instant_sync_sleep(_delay: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", _instant_async_sleep)
-    monkeypatch.setattr(time, "sleep", _instant_sync_sleep)
-    yield

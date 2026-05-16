@@ -277,9 +277,19 @@ class CloseIntent(StrictModel):
     ``units_to_deduct=None`` means "close the entire position" (matches
     eToro's ``UnitsToDeduct: null`` payload). A positive value performs a
     partial close.
+
+    Both :attr:`position_id` and :attr:`instrument_id` are required: the
+    eToro close endpoint puts the position ID in the URL but **also**
+    requires the matching ``InstrumentID`` in the body as a server-side
+    cross-check (a body without it returns ``HTTP 400 -- InstrumentId:
+    The instrument id does not exist``). Pull both from
+    :attr:`AccountSnapshot.positions` or from a verified open
+    :class:`TradeResult` (which carries ``position_id`` and
+    ``instrument_id`` after :func:`verify_orders`).
     """
 
     position_id: PositionID
+    instrument_id: InstrumentID
     units_to_deduct: Money | None = None
 
     @field_validator("units_to_deduct")

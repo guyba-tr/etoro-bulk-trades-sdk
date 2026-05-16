@@ -1,9 +1,10 @@
 """Integration-test fixtures gated by ``ETORO_DEMO_USER_KEY``.
 
-These run against the **demo** environment and place small ($5) trades that
-the suite then closes. Skipped automatically when the env var is unset.
-``ETORO_DEMO_API_KEY`` is optional; if absent, the SDK's bundled default
-partner key is used.
+These run against the **demo** environment and place small (~$25) crypto
+trades that the suite then closes. Crypto is used because it trades 24/7;
+equity tickers would make the verification step flaky on weekends.
+Skipped automatically when the env var is unset. ``ETORO_DEMO_API_KEY``
+is optional; if absent, the SDK's bundled default partner key is used.
 """
 
 from __future__ import annotations

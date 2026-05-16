@@ -290,8 +290,18 @@ async def close_trade(
     ``UnitsToDeduct: null`` performs a full close; a positive value performs
     a partial close. The position lookup is the caller's responsibility —
     typically read from :class:`AccountSnapshot.positions`.
+
+    The eToro close endpoint requires both the position ID in the URL **and**
+    the matching ``InstrumentID`` in the body as a server-side cross-check;
+    omitting it returns ``HTTP 400 -- InstrumentId: The instrument id does
+    not exist``. :class:`CloseIntent` enforces both fields.
     """
-    body = {"UnitsToDeduct": float(intent.units_to_deduct) if intent.units_to_deduct else None}
+    body = {
+        "InstrumentID": int(intent.instrument_id),
+        "UnitsToDeduct": (
+            float(intent.units_to_deduct) if intent.units_to_deduct else None
+        ),
+    }
     path = f"/trading/execution/{env}/market-close-orders/positions/{int(intent.position_id)}"
 
     try:
@@ -299,7 +309,7 @@ async def close_trade(
     except HttpStatusError as exc:
         return _failed_result(
             intent,
-            None,
+            intent.instrument_id,
             intent.units_to_deduct,
             status="failed",
             error=f"HTTP {exc.status_code}: {exc.body}",
@@ -307,7 +317,7 @@ async def close_trade(
     except RateLimitError as exc:
         return _failed_result(
             intent,
-            None,
+            intent.instrument_id,
             intent.units_to_deduct,
             status="rate_limited_giveup",
             error=str(exc),
@@ -315,7 +325,7 @@ async def close_trade(
     except TransportError as exc:
         return _failed_result(
             intent,
-            None,
+            intent.instrument_id,
             intent.units_to_deduct,
             status="ambiguous",
             error=str(exc),
@@ -325,7 +335,7 @@ async def close_trade(
     order_id_raw = payload.get("orderID") if isinstance(payload, dict) else None
     return TradeResult(
         intent=intent,
-        instrument_id=None,
+        instrument_id=intent.instrument_id,
         status="ok",
         order_id=cast(OrderID, int(order_id_raw)) if order_id_raw is not None else None,
         position_id=cast(PositionID, int(intent.position_id)),
@@ -844,7 +854,11 @@ async def rebalance(
             close_buffer_pct=plan.close_buffer_pct,
         )
         for position_id, units in plans:
-            close_intent = CloseIntent(position_id=position_id, units_to_deduct=units)
+            close_intent = CloseIntent(
+                position_id=position_id,
+                instrument_id=delta.instrument.instrument_id,
+                units_to_deduct=units,
+            )
             try:
                 tr = await close_trade(http, env=env, intent=close_intent)
             except AuthError:

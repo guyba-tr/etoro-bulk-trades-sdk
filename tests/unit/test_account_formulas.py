@@ -73,6 +73,65 @@ def test_build_snapshot_groups_pendings_correctly(pnl_fixture: dict[str, Any]) -
     assert snap.mirrors[0].mirror_id == 99
 
 
+def test_mirror_user_id_reads_uppercase_cid() -> None:
+    """Real wire shape uses ``CID`` (capital) for the copied investor's user
+    ID — matches the rest of the snapshot's capital-suffix convention. The
+    parser must accept it; missing key must raise a clear error."""
+    cp = {
+        "credit": 100.0,
+        "mirrors": [
+            {
+                "mirrorID": 42,
+                "CID": 22770558,
+                "availableAmount": 7.24,
+                "closedPositionsNetProfit": 0.0,
+                "positions": [],
+            }
+        ],
+    }
+    snap = build_snapshot(cp, env="real")
+    assert len(snap.mirrors) == 1
+    assert int(snap.mirrors[0].user_id) == 22770558
+    assert snap.mirrors[0].mirror_id == 42
+
+
+def test_mirror_user_id_falls_back_to_userid_variant() -> None:
+    """Forward-compat: accept ``userId`` / ``userID`` if eToro ever flips."""
+    for variant in ("userId", "userID"):
+        cp = {
+            "credit": 100.0,
+            "mirrors": [
+                {
+                    "mirrorID": 42,
+                    variant: 999,
+                    "availableAmount": 0.0,
+                    "closedPositionsNetProfit": 0.0,
+                    "positions": [],
+                }
+            ],
+        }
+        snap = build_snapshot(cp, env="real")
+        assert int(snap.mirrors[0].user_id) == 999, f"failed for variant {variant!r}"
+
+
+def test_mirror_without_any_cid_field_raises() -> None:
+    cp = {
+        "credit": 100.0,
+        "mirrors": [
+            {
+                "mirrorID": 42,
+                "availableAmount": 0.0,
+                "closedPositionsNetProfit": 0.0,
+                "positions": [],
+            }
+        ],
+    }
+    import pytest
+
+    with pytest.raises(KeyError, match="missing CID"):
+        build_snapshot(cp, env="real")
+
+
 def test_money_coercion_preserves_decimal_precision() -> None:
     """The wire delivers floats (``5000.00``); coercion must not introduce
     ``0.1 + 0.2`` drift."""

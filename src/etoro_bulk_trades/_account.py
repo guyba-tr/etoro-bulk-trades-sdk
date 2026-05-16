@@ -229,9 +229,22 @@ def _parse_pending_order(o: dict[str, Any]) -> PendingOrder:
 
 
 def _parse_mirror(m: dict[str, Any]) -> Mirror:
+    """Decode one ``clientPortfolio.mirrors[]`` entry.
+
+    The copied investor's user ID arrives as ``CID`` (capital — matching the
+    rest of the snapshot's capital-suffix identifier convention); accept
+    ``userId`` / ``userID`` as fallbacks for forward compatibility.
+    """
+    cid_raw = m.get("CID")
+    if cid_raw is None:
+        cid_raw = m.get("userID") or m.get("userId")
+    if cid_raw is None:
+        raise KeyError(
+            f"mirror entry missing CID field (keys present: {sorted(m.keys())})"
+        )
     return Mirror(
         mirror_id=int(m["mirrorID"]),
-        user_id=cast(CID, int(m["userId"])),
+        user_id=cast(CID, int(cid_raw)),
         available_amount=_to_decimal(m.get("availableAmount")),
         closed_positions_net_profit=_to_decimal(m.get("closedPositionsNetProfit")),
         positions=tuple(

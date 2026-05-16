@@ -41,8 +41,13 @@ async def main() -> int:
         assert isinstance(verified, TradeResult)
         print(f"Verify → status={verified.status} position_id={verified.position_id}")
 
-        if verified.position_id is not None:
-            closed = await client.close_trade(CloseIntent(position_id=verified.position_id))
+        if verified.position_id is not None and verified.instrument_id is not None:
+            closed = await client.close_trade(
+                CloseIntent(
+                    position_id=verified.position_id,
+                    instrument_id=verified.instrument_id,
+                )
+            )
             print(f"Close → status={closed.status} order_id={closed.order_id}")
     return 0
 
