@@ -28,11 +28,11 @@ async def main() -> int:
     parser.add_argument("--execute", action="store_false", dest="dry_run")
     args = parser.parse_args()
 
-    api_key = os.environ.get("ETORO_API_KEY")
     user_key = os.environ.get("ETORO_USER_KEY")
+    api_key = os.environ.get("ETORO_API_KEY")
     env_arg = os.environ.get("ETORO_ENV", "demo")
-    if not api_key or not user_key:
-        print("Set ETORO_API_KEY and ETORO_USER_KEY first.", file=sys.stderr)
+    if not user_key:
+        print("Set ETORO_USER_KEY first.", file=sys.stderr)
         return 2
     env: Environment = cast("Environment", env_arg)
 
@@ -43,7 +43,7 @@ async def main() -> int:
         }
     )
 
-    async with AsyncBulkTradesClient.from_api_key(api_key, user_key) as client:
+    async with AsyncBulkTradesClient.from_api_key(user_key, api_key=api_key) as client:
         await client.connect(env=env)
         try:
             result = await client.rebalance(

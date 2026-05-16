@@ -89,8 +89,13 @@ class BulkTradesClient:
     # ── constructors ──────────────────────────────────────────────────────
 
     @classmethod
-    def from_api_key(cls, api_key: str, user_key: str) -> BulkTradesClient:
-        return cls(AsyncBulkTradesClient.from_api_key(api_key, user_key))
+    def from_api_key(
+        cls,
+        user_key: str,
+        *,
+        api_key: str | None = None,
+    ) -> BulkTradesClient:
+        return cls(AsyncBulkTradesClient.from_api_key(user_key, api_key=api_key))
 
     @classmethod
     def from_bearer(

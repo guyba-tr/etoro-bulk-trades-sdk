@@ -16,11 +16,11 @@ from etoro_bulk_trades import (
 
 
 async def main() -> int:
-    api_key = os.environ.get("ETORO_API_KEY")
     user_key = os.environ.get("ETORO_USER_KEY")
+    api_key = os.environ.get("ETORO_API_KEY")
     env_arg = os.environ.get("ETORO_ENV", "demo")
-    if not api_key or not user_key:
-        print("Set ETORO_API_KEY and ETORO_USER_KEY first.", file=sys.stderr)
+    if not user_key:
+        print("Set ETORO_USER_KEY first.", file=sys.stderr)
         return 2
     env: Environment = cast("Environment", env_arg)
 
@@ -33,7 +33,7 @@ async def main() -> int:
         total_amount=Decimal("15"),
     )
 
-    async with AsyncBulkTradesClient.from_api_key(api_key, user_key) as client:
+    async with AsyncBulkTradesClient.from_api_key(user_key, api_key=api_key) as client:
         await client.connect(env=env)
 
         result = await client.execute_bulk_trade(

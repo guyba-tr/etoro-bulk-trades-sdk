@@ -157,16 +157,19 @@ def _short(body: Any, limit: int = 200) -> str:
 
 
 async def main() -> int:
-    api_key = os.environ.get("ETORO_DEMO_API_KEY")
     user_key = os.environ.get("ETORO_DEMO_USER_KEY")
-    if not api_key or not user_key:
+    api_key = os.environ.get("ETORO_DEMO_API_KEY")
+    if not user_key:
         print(
-            "ETORO_DEMO_API_KEY and ETORO_DEMO_USER_KEY are required for probes A1/A5/A7.",
+            "ETORO_DEMO_USER_KEY is required for probes A1/A5/A7.",
             file=sys.stderr,
         )
         return 2
 
-    handle = AuthHandle(ApiKeyAuth(api_key=api_key, user_key=user_key))
+    auth = (
+        ApiKeyAuth(user_key=user_key, api_key=api_key) if api_key else ApiKeyAuth(user_key=user_key)
+    )
+    handle = AuthHandle(auth)
     http = HttpClient(auth_provider=handle)
     handle.bind(http)
 

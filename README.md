@@ -51,8 +51,10 @@ from etoro_bulk_trades import (
 
 
 async def main() -> None:
+    # `user_key` is required; `api_key` defaults to the SDK's bundled
+    # partner key — pass `api_key=...` explicitly only if you have a
+    # dedicated partner-tier key.
     async with AsyncBulkTradesClient.from_api_key(
-        api_key="...partner key...",
         user_key="...per-user key...",
     ) as client:
         info = await client.connect(env="real")  # raises if key is demo
@@ -84,7 +86,7 @@ The sync facade is a drop-in replacement for scripts and notebooks:
 ```python
 from etoro_bulk_trades import BulkTradesClient
 
-with BulkTradesClient.from_api_key(api_key, user_key) as client:
+with BulkTradesClient.from_api_key(user_key) as client:
     client.connect(env="demo")
     snap = client.get_account()
 ```
@@ -96,8 +98,12 @@ The SDK supports both Public API auth modes documented at
 
 | Mode | Constructor | Headers used |
 |---|---|---|
-| Partner / API key | `AsyncBulkTradesClient.from_api_key(api_key, user_key)` | `x-api-key`, `x-user-key` |
+| Partner / API key | `AsyncBulkTradesClient.from_api_key(user_key, *, api_key=None)` | `x-api-key`, `x-user-key` |
 | OAuth / Bearer | `AsyncBulkTradesClient.from_bearer(access_token, ...)` | `Authorization: Bearer ...` |
+
+For API-key auth, `user_key` (the per-user `x-user-key`) is required;
+`api_key` defaults to the SDK's bundled partner key — pass `api_key=`
+explicitly only if your integration has its own partner-tier credential.
 
 For Bearer auth, supply `refresh_token`, `client_id`, and an
 `on_token_refresh: Callable[[TokenPair], None]` callback so the SDK can

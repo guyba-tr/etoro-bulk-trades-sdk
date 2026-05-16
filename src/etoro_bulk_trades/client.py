@@ -6,7 +6,7 @@ account / trade calls:
 
 .. code-block:: python
 
-    async with AsyncBulkTradesClient.from_api_key(api_key, user_key) as client:
+    async with AsyncBulkTradesClient.from_api_key(user_key) as client:
         info = await client.connect(env="real")
         snap = await client.get_account()
         ...
@@ -89,12 +89,27 @@ class AsyncBulkTradesClient:
     # ── constructors ──────────────────────────────────────────────────────
 
     @classmethod
-    def from_api_key(cls, api_key: str, user_key: str) -> AsyncBulkTradesClient:
-        """Build a client using a partner ``x-api-key`` + per-user
-        ``x-user-key`` credential pair."""
-        if not api_key or not user_key:
-            raise ValueError("api_key and user_key are both required")
-        return cls(AuthHandle(ApiKeyAuth(api_key=api_key, user_key=user_key)))
+    def from_api_key(
+        cls,
+        user_key: str,
+        *,
+        api_key: str | None = None,
+    ) -> AsyncBulkTradesClient:
+        """Build a client using a per-user ``x-user-key`` (required) and a
+        partner ``x-api-key`` (optional; defaults to
+        :data:`etoro_bulk_trades._auth.DEFAULT_API_KEY`).
+
+        Pass ``api_key=`` explicitly if your integration uses a dedicated
+        partner key.
+        """
+        if not user_key:
+            raise ValueError("user_key is required")
+        auth = (
+            ApiKeyAuth(user_key=user_key, api_key=api_key)
+            if api_key is not None
+            else ApiKeyAuth(user_key=user_key)
+        )
+        return cls(AuthHandle(auth))
 
     @classmethod
     def from_bearer(

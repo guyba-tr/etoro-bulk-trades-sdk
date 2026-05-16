@@ -41,17 +41,28 @@ if TYPE_CHECKING:
 # ── credential containers ───────────────────────────────────────────────────
 
 
+DEFAULT_API_KEY: str = "sdgdskldFPLGfjHn1421dgnlxdGTbngdflg6290bRjslfihsjhSDsdgGHH25hjf"
+"""Shared partner ``x-api-key`` used when the caller doesn't supply one.
+
+Per-user identification comes from ``x-user-key`` (which is always required);
+this value is the partner tier and is safe to default. Override by passing
+``api_key=`` explicitly to :class:`ApiKeyAuth` or
+:meth:`AsyncBulkTradesClient.from_api_key` if your integration uses a
+dedicated partner key."""
+
+
 @dataclass
 class ApiKeyAuth:
     """Partner-key auth.
 
-    Both fields are required; the API rejects requests that send only one.
-    The SDK never falls back to API-key headers when Bearer is in use, and
-    vice-versa.
+    ``user_key`` is always required; ``api_key`` defaults to
+    :data:`DEFAULT_API_KEY`. The API rejects requests that send only one of
+    the two headers, so both are always emitted on the wire. The SDK never
+    falls back to API-key headers when Bearer is in use, and vice-versa.
     """
 
-    api_key: str
     user_key: str
+    api_key: str = DEFAULT_API_KEY
 
     def headers(self) -> dict[str, str]:
         return {"x-api-key": self.api_key, "x-user-key": self.user_key}
