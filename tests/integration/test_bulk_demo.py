@@ -25,6 +25,20 @@ from etoro_bulk_trades import (
 @pytest.mark.integration
 async def test_bulk_three_small_crypto_positions(demo_client: AsyncBulkTradesClient) -> None:
     symbols = ("BTC", "ETH", "ADA")
+
+    # Snapshot which crypto positions the account already holds so the
+    # cleanup loop only closes positions THIS test opened. Closing
+    # pre-existing positions is the bug class fixed in commit history
+    # (was: cleanup matched by instrument_id without a pre/post diff).
+    refs = await demo_client.resolve(list(symbols))
+    target_ids = {int(refs[s].instrument_id) for s in symbols}
+    pre_snap = await demo_client.get_account()
+    pre_pids_by_iid: dict[int, set[int]] = {iid: set() for iid in target_ids}
+    for pos in pre_snap.positions:
+        iid = int(pos.instrument_id)
+        if iid in target_ids:
+            pre_pids_by_iid[iid].add(int(pos.position_id))
+
     plan = BulkTradePlan(
         weights={
             "BTC": Decimal("0.34"),
@@ -47,12 +61,24 @@ async def test_bulk_three_small_crypto_positions(demo_client: AsyncBulkTradesCli
         f"unexpected statuses: {statuses}"
     )
 
-    # Clean up: resolve the symbols we opened, then close any matching positions.
-    refs = await demo_client.resolve(list(symbols))
-    target_ids = {int(refs[s].instrument_id) for s in symbols}
-    snap = await demo_client.get_account()
-    for pos in snap.positions:
-        if int(pos.instrument_id) in target_ids:
+    # Every filled trade must have an attributed position_id that is NOT in
+    # the pre-trade set for its instrument.
+    for tr in result.trades:
+        if tr.status == "filled":
+            assert tr.position_id is not None, (
+                f"filled trade missing position_id (error: {tr.error})"
+            )
+            assert tr.instrument_id is not None
+            iid = int(tr.instrument_id)
+            assert int(tr.position_id) not in pre_pids_by_iid.get(iid, set()), (
+                f"verifier returned a pre-existing position_id for instrument {iid}"
+            )
+
+    # Clean up: close ONLY positions that did not exist before the test.
+    post_snap = await demo_client.get_account()
+    for pos in post_snap.positions:
+        iid = int(pos.instrument_id)
+        if iid in target_ids and int(pos.position_id) not in pre_pids_by_iid.get(iid, set()):
             with contextlib.suppress(EtoroSDKError):
                 await demo_client.close_trade(
                     CloseIntent(

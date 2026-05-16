@@ -121,9 +121,17 @@ async def _pnl_classify(
     http: HttpClient,
     *,
     env: Environment,
-) -> tuple[set[int], set[int], dict[int, int]]:
+) -> tuple[set[int], set[int], dict[int, list[int]]]:
     """Read ``/pnl`` and return ``(filled_instrument_ids, pending_order_ids,
-    instrument_to_position_id)``.
+    instrument_to_position_ids)``.
+
+    The third element maps each ``instrument_id`` to the **list of all
+    non-mirror ``position_id`` values** the account currently holds for
+    that instrument. Callers that need to attribute a freshly-opened
+    position must subtract their pre-trade snapshot from the list to find
+    the new entry. Returning a list rather than a single id avoids the
+    silent-overwrite trap of a ``{iid: pid}`` dict comprehension when the
+    account holds multiple positions on the same instrument.
 
     The 10s PnL cache wait is the responsibility of the caller (it's only
     needed once for an entire verify run, not per trade).
@@ -132,10 +140,14 @@ async def _pnl_classify(
     if not isinstance(body, dict) or "clientPortfolio" not in body:
         return set(), set(), {}
     snap = build_snapshot(body["clientPortfolio"], env=env)
-    filled_iids: set[int] = {int(p.instrument_id) for p in snap.positions}
+    filled_iids: set[int] = {int(p.instrument_id) for p in snap.positions if not p.is_mirror}
     pending_oids: set[int] = {int(o.order_id) for o in snap.pending_orders}
-    iid_to_pid: dict[int, int] = {int(p.instrument_id): int(p.position_id) for p in snap.positions}
-    return filled_iids, pending_oids, iid_to_pid
+    iid_to_pids: dict[int, list[int]] = {}
+    for p in snap.positions:
+        if p.is_mirror:
+            continue
+        iid_to_pids.setdefault(int(p.instrument_id), []).append(int(p.position_id))
+    return filled_iids, pending_oids, iid_to_pids
 
 
 async def _verify_trades(
@@ -185,7 +197,7 @@ async def _verify_trades(
     # Always do the PnL pass for whatever WS didn't observe (or for ``pnl``
     # mode). One sleep + one read covers the whole batch.
     await sleeper(PNL_CACHE_WINDOW_S)
-    filled_iids, pending_oids, iid_to_pid = await _pnl_classify(http, env=env)
+    filled_iids, pending_oids, iid_to_pids = await _pnl_classify(http, env=env)
 
     upgraded: list[TradeResult] = []
     for tr in trades:
@@ -199,11 +211,48 @@ async def _verify_trades(
         # Match by instrument_id (the typical case for open verification —
         # the OrderID lives in the response, but /pnl doesn't expose it
         # again once the order has filled into a position).
+        #
+        # **Safety rule**: only attribute a ``position_id`` to this trade if
+        # there is exactly **one** position for this instrument that did
+        # NOT exist before the trade was placed (see
+        # :attr:`TradeResult.pre_existing_position_ids`). If pre-trade
+        # capture is missing, fall back to "all current positions for the
+        # instrument" — but if that set has more than one entry, leave
+        # ``position_id=None`` rather than guess. Closing a guessed
+        # position is catastrophic and unrecoverable.
         if tr.instrument_id is not None and int(tr.instrument_id) in filled_iids:
-            pid = iid_to_pid.get(int(tr.instrument_id))
+            current_pids = iid_to_pids.get(int(tr.instrument_id), [])
+            pre_set = {int(p) for p in tr.pre_existing_position_ids}
+            new_pids = [pid for pid in current_pids if pid not in pre_set]
             updates: dict[str, object] = {"status": _upgrade_status(tr.status, "filled")}
-            if pid is not None:
-                updates["position_id"] = cast(PositionID, pid)
+            error_note: str | None = None
+            if len(new_pids) == 1:
+                updates["position_id"] = cast(PositionID, new_pids[0])
+            elif len(new_pids) == 0:
+                # Position already existed (rare: caller forgot to pass a
+                # pre-snapshot AND only one position is present, so we
+                # cannot prove novelty), or the open fell into a fill we
+                # can't yet see. Leave position_id unset.
+                error_note = (
+                    "verifier could not identify the new position: no "
+                    "position with a fresh positionID was found for "
+                    f"instrument_id={int(tr.instrument_id)} after the "
+                    "PnL cache wait."
+                )
+            else:
+                # Multiple new-looking candidates — refuse to pick. This
+                # is the safe failure mode that prevents closing the
+                # wrong position.
+                error_note = (
+                    "verifier refuses to assign position_id: "
+                    f"{len(new_pids)} positions for "
+                    f"instrument_id={int(tr.instrument_id)} are not in "
+                    "pre_existing_position_ids. Caller must disambiguate "
+                    "(see TradeResult.pre_existing_position_ids and "
+                    "AccountSnapshot.positions)."
+                )
+            if error_note is not None and tr.error is None:
+                updates["error"] = error_note
             upgraded.append(tr.model_copy(update=updates))
             continue
 

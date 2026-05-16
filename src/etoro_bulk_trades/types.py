@@ -405,6 +405,21 @@ class TradeResult(StrictModel):
     filled_amount: Money | None = None
     filled_units: Money | None = None
     error: str | None = None
+    pre_existing_position_ids: tuple[PositionID, ...] = ()
+    """Snapshot of position IDs the account already held for this
+    :attr:`instrument_id` immediately **before** the open POST.
+
+    Used by :func:`~etoro_bulk_trades._verify.verify_orders` to identify
+    *which* position in ``/pnl`` is the one the trade just opened: the new
+    position is whichever ``positionID`` exists in the post-trade snapshot
+    but **not** in this set. Without it the verifier cannot distinguish a
+    freshly-opened position from a pre-existing one on the same instrument
+    and would risk attributing the wrong ``position_id`` (which is
+    catastrophic if the caller then closes against it).
+
+    Empty tuple for close-intent results and for cases where the SDK
+    didn't read a pre-snapshot (e.g. caller-constructed :class:`TradeResult`
+    objects passed to :func:`verify_orders` directly)."""
 
 
 class BulkTradeSummary(StrictModel):

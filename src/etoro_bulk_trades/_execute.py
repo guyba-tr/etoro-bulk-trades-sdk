@@ -103,11 +103,31 @@ async def fetch_snapshot(http: HttpClient, env: Environment) -> AccountSnapshot:
 # ── at-most-once classifier ────────────────────────────────────────────────
 
 
+def _collect_pre_existing_pids(
+    snapshot: AccountSnapshot,
+    instrument_id: InstrumentID,
+) -> tuple[PositionID, ...]:
+    """Position IDs the account already holds for ``instrument_id``.
+
+    Mirror positions are excluded (rebalance/open never touches copy
+    positions, and the close endpoint we use isn't valid for them
+    anyway). The result is stored on :class:`TradeResult` so the verifier
+    can later identify which position in ``/pnl`` is the new one.
+    """
+    return tuple(
+        p.position_id
+        for p in snapshot.positions
+        if int(p.instrument_id) == int(instrument_id) and not p.is_mirror
+    )
+
+
 def _classify_open_response(
     intent: OpenIntent,
     instrument_id: InstrumentID,
     requested_amount: Decimal | None,
     body: Any,
+    *,
+    pre_existing_position_ids: tuple[PositionID, ...] = (),
 ) -> TradeResult:
     """Map a 2xx ``market-open-orders/by-amount|by-units`` response into a
     typed :class:`TradeResult` with status ``ok``.
@@ -140,6 +160,7 @@ def _classify_open_response(
         requested_amount=requested_amount,
         filled_amount=(Decimal(str(payload["amount"])) if "amount" in payload else None),
         filled_units=None,  # market-open responses don't include units
+        pre_existing_position_ids=pre_existing_position_ids,
     )
 
 
@@ -150,6 +171,7 @@ def _failed_result(
     *,
     status: TradeStatus,
     error: str,
+    pre_existing_position_ids: tuple[PositionID, ...] = (),
 ) -> TradeResult:
     return TradeResult(
         intent=intent,
@@ -161,6 +183,7 @@ def _failed_result(
         filled_amount=None,
         filled_units=None,
         error=error,
+        pre_existing_position_ids=pre_existing_position_ids,
     )
 
 
@@ -201,9 +224,15 @@ async def open_trade(
     """
     ref = await _resolve_one(http, cache, intent.instrument)
 
+    # Always read a snapshot (even on the by-units path) so we can capture
+    # which positions for this instrument the account already holds. The
+    # verifier needs this set to safely identify the just-opened position
+    # without confusing it with pre-existing ones on the same instrument.
+    snap = snapshot or await fetch_snapshot(http, env)
+    pre_pids = _collect_pre_existing_pids(snap, ref.instrument_id)
+
     requested_amount = intent.amount
     if intent.amount is not None:
-        snap = snapshot or await fetch_snapshot(http, env)
         if intent.amount > snap.available_cash:
             raise InsufficientCashError(
                 requested=intent.amount,
@@ -252,6 +281,7 @@ async def open_trade(
             requested_amount,
             status="failed",
             error=f"HTTP {exc.status_code}: {exc.body}",
+            pre_existing_position_ids=pre_pids,
         )
     except RateLimitError as exc:
         return _failed_result(
@@ -260,6 +290,7 @@ async def open_trade(
             requested_amount,
             status="rate_limited_giveup",
             error=str(exc),
+            pre_existing_position_ids=pre_pids,
         )
     except TransportError as exc:
         # Per at-most-once: timeouts / connection drops are AMBIGUOUS, never
@@ -270,13 +301,20 @@ async def open_trade(
             requested_amount,
             status="ambiguous",
             error=str(exc),
+            pre_existing_position_ids=pre_pids,
         )
     except EtoroSDKError as exc:
         # 401 (InvalidCredentials, SessionExpired) propagates — the caller
         # decides whether to surface "no trade was placed" or stop a batch.
         raise exc
 
-    return _classify_open_response(intent, ref.instrument_id, requested_amount, response)
+    return _classify_open_response(
+        intent,
+        ref.instrument_id,
+        requested_amount,
+        response,
+        pre_existing_position_ids=pre_pids,
+    )
 
 
 async def close_trade(
@@ -411,12 +449,16 @@ async def _execute_one_open(
     requested_amount: Decimal,
     is_buy: bool,
     leverage: int,
+    pre_existing_position_ids: tuple[PositionID, ...] = (),
 ) -> TradeResult:
     """Single open-by-amount POST inside a bulk loop.
 
     Distinct from :func:`open_trade` because the bulk loop has already done
     the pre-flight cash + open-buffer math; we just send the POST and
-    classify.
+    classify. ``pre_existing_position_ids`` is captured by the caller from
+    the anchor snapshot and threaded through to the resulting
+    :class:`TradeResult` so verification can identify the new position
+    unambiguously.
     """
     body = {
         "InstrumentID": int(instrument_id),
@@ -438,6 +480,7 @@ async def _execute_one_open(
             requested_amount,
             status="failed",
             error=f"HTTP {exc.status_code}: {exc.body}",
+            pre_existing_position_ids=pre_existing_position_ids,
         )
     except RateLimitError as exc:
         return _failed_result(
@@ -446,6 +489,7 @@ async def _execute_one_open(
             requested_amount,
             status="rate_limited_giveup",
             error=str(exc),
+            pre_existing_position_ids=pre_existing_position_ids,
         )
     except TransportError as exc:
         return _failed_result(
@@ -454,8 +498,15 @@ async def _execute_one_open(
             requested_amount,
             status="ambiguous",
             error=str(exc),
+            pre_existing_position_ids=pre_existing_position_ids,
         )
-    return _classify_open_response(intent, instrument_id, requested_amount, response)
+    return _classify_open_response(
+        intent,
+        instrument_id,
+        requested_amount,
+        response,
+        pre_existing_position_ids=pre_existing_position_ids,
+    )
 
 
 async def execute_bulk_trade(
@@ -495,6 +546,13 @@ async def execute_bulk_trade(
     equity_anchor = snap.equity
     cash_anchor = snap.available_cash
 
+    # Capture which positions the account already holds for each instrument
+    # in the plan. Threaded through to every TradeResult so verify_orders
+    # can tell a newly-opened position apart from a pre-existing one.
+    pre_pids_by_key: dict[str | int, tuple[PositionID, ...]] = {
+        key: _collect_pre_existing_pids(snap, refs[key].instrument_id) for key in plan.weights
+    }
+
     if plan.total_amount > cash_anchor:
         raise InsufficientCashError(
             requested=plan.total_amount,
@@ -525,6 +583,7 @@ async def execute_bulk_trade(
                     instrument_id=ref.instrument_id,
                     status="ok",
                     requested_amount=amt,
+                    pre_existing_position_ids=pre_pids_by_key[key],
                 )
             )
         return BulkTradeResult(
@@ -545,6 +604,7 @@ async def execute_bulk_trade(
     for idx, key in enumerate(keys):
         ref = refs[key]
         amt = amounts[key]
+        pre_pids = pre_pids_by_key[key]
 
         if auth_error is not None:
             # 401 already hit; mark every remaining trade as not-attempted.
@@ -561,6 +621,7 @@ async def execute_bulk_trade(
                     amt,
                     status="failed",
                     error="not attempted (workflow stopped after upstream 401)",
+                    pre_existing_position_ids=pre_pids,
                 )
             )
             continue
@@ -584,6 +645,7 @@ async def execute_bulk_trade(
                         f"cumulative ceiling violated at index {idx}: "
                         f"spent={spent_so_far} + next={amt} > planned={total_planned}"
                     ),
+                    pre_existing_position_ids=pre_pids,
                 )
             )
             continue
@@ -603,6 +665,7 @@ async def execute_bulk_trade(
                 requested_amount=amt,
                 is_buy=plan.is_buy,
                 leverage=plan.leverage,
+                pre_existing_position_ids=pre_pids,
             )
         except AuthError as exc:
             # Stop the batch.
@@ -614,6 +677,7 @@ async def execute_bulk_trade(
                     amt,
                     status="failed",
                     error=f"401 stopped the batch: {exc}",
+                    pre_existing_position_ids=pre_pids,
                 )
             )
             continue
@@ -906,6 +970,10 @@ async def rebalance(
         if delta.action not in ("open", "increase"):
             continue
         amt = floor_cents(delta.delta_amount)
+        # Pre-existing PIDs come from the post-close snapshot so we don't
+        # mis-attribute a brand-new Phase-2 fill to a position that
+        # survived Phase 1.
+        pre_pids = _collect_pre_existing_pids(settled, delta.instrument.instrument_id)
         if spent_so_far + amt > settled.available_cash:
             phase_2.append(
                 _failed_result(
@@ -922,6 +990,7 @@ async def rebalance(
                         "cumulative cash check failed in Phase 2: "
                         f"spent={spent_so_far} + next={amt} > available={settled.available_cash}"
                     ),
+                    pre_existing_position_ids=pre_pids,
                 )
             )
             continue
@@ -940,6 +1009,7 @@ async def rebalance(
                 requested_amount=amt,
                 is_buy=plan.is_buy,
                 leverage=plan.leverage,
+                pre_existing_position_ids=pre_pids,
             )
         except AuthError:
             phase_2.append(
@@ -949,6 +1019,7 @@ async def rebalance(
                     amt,
                     status="failed",
                     error="401 stopped Phase 2",
+                    pre_existing_position_ids=pre_pids,
                 )
             )
             break
