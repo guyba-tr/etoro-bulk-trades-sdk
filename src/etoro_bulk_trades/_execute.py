@@ -298,9 +298,7 @@ async def close_trade(
     """
     body = {
         "InstrumentID": int(intent.instrument_id),
-        "UnitsToDeduct": (
-            float(intent.units_to_deduct) if intent.units_to_deduct else None
-        ),
+        "UnitsToDeduct": (float(intent.units_to_deduct) if intent.units_to_deduct else None),
     }
     path = f"/trading/execution/{env}/market-close-orders/positions/{int(intent.position_id)}"
 

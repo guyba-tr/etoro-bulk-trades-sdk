@@ -239,9 +239,7 @@ def _parse_mirror(m: dict[str, Any]) -> Mirror:
     if cid_raw is None:
         cid_raw = m.get("userID") or m.get("userId")
     if cid_raw is None:
-        raise KeyError(
-            f"mirror entry missing CID field (keys present: {sorted(m.keys())})"
-        )
+        raise KeyError(f"mirror entry missing CID field (keys present: {sorted(m.keys())})")
     return Mirror(
         mirror_id=int(m["mirrorID"]),
         user_id=cast(CID, int(cid_raw)),
