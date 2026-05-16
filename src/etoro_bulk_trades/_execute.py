@@ -8,8 +8,7 @@ classifier into the four user-visible workflows.
 * :func:`execute_bulk_trade` — multi-position open from one cash pool.
 * :func:`rebalance` — close-then-wait-then-open against a target allocation.
 
-All four share the same execution disciplines from the
-``etoro-trading-assistant`` agent skill:
+All four share the same execution disciplines:
 
 * **Anchor freeze** — read ``/pnl`` once at workflow start; freeze
   ``EQUITY_ANCHOR`` / ``CASH_ANCHOR``; never recompute mid-flow.
@@ -18,9 +17,33 @@ All four share the same execution disciplines from the
 * **Open buffer** — when the plan would leave cash below 1% of equity,
   shrink each open by 1% so per-trade fees can't push displayed cash
   negative.
-* **At-most-once** — every trade-execution POST follows the status table
-  in :func:`_classify_response`; ambiguous outcomes are reconciled by
-  reading state in ``verify_orders``, never by re-firing.
+* **At-most-once** — every trade-execution POST follows the decision
+  table from the ``etoro-api-conventions`` rule (§ "Trade-execution
+  endpoints have NO idempotency key"):
+
+  ===========================================  ==============================
+  Outcome                                      Status / action
+  ===========================================  ==============================
+  2xx with ``orderId``                         ``ok`` — done, don't resend
+  4xx (other than 429)                         ``failed`` — surface, don't retry
+  401                                          ``failed`` (in concurrent gather:
+                                               folded per-trade so siblings
+                                               aren't cancelled mid-send)
+  429 after backoff retries                    ``rate_limited_giveup``
+  5xx with body                                ``failed`` (per HTTP layer)
+  Timeout / connection reset / parse error    ``ambiguous`` — verifier
+                                               reconciles via ``/pnl``
+  ===========================================  ==============================
+
+* **Concurrent gather, never cancellation** — :func:`execute_bulk_trade`
+  and both :func:`rebalance` phases fire all per-trade POSTs in one
+  ``asyncio.gather``. The 20 rpm execution rate-limiter serializes
+  underlying sends; the per-task error handlers (in
+  :func:`_execute_one_open` and :func:`_execute_one_close`) map every
+  failure class onto a typed :class:`TradeResult` status. Cancelling a
+  sibling task mid-POST would create at-most-once-violating ambiguity
+  (the trade may have reached the server and executed), so no batch
+  function ever lets one trade's failure bring down siblings.
 """
 
 from __future__ import annotations
@@ -317,22 +340,27 @@ async def open_trade(
     )
 
 
-async def close_trade(
+async def _execute_one_close(
     http: HttpClient,
     *,
     env: Environment,
     intent: CloseIntent,
+    raise_auth: bool,
 ) -> TradeResult:
-    """Execute a single full or partial close by ``position_id``.
+    """Single close POST. Shared between :func:`close_trade` (single,
+    ``raise_auth=True``) and the parallel rebalance-Phase-1 close gather
+    (``raise_auth=False``, same reasoning as :func:`_execute_one_open`).
 
-    ``UnitsToDeduct: null`` performs a full close; a positive value performs
-    a partial close. The position lookup is the caller's responsibility —
-    typically read from :class:`AccountSnapshot.positions`.
+    Per the at-most-once decision table, every error class maps to a
+    distinct :class:`TradeResult.status`:
 
-    The eToro close endpoint requires both the position ID in the URL **and**
-    the matching ``InstrumentID`` in the body as a server-side cross-check;
-    omitting it returns ``HTTP 400 -- InstrumentId: The instrument id does
-    not exist``. :class:`CloseIntent` enforces both fields.
+    * 4xx → ``failed``
+    * 401 → re-raised when ``raise_auth=True``; folded into ``failed``
+      otherwise (sibling closes are already in flight; cancellation
+      mid-send creates at-most-once-violating ambiguity).
+    * 429 (after retries) → ``rate_limited_giveup``
+    * Timeout / connection reset → ``ambiguous`` (verifier reconciles
+      via ``/pnl``).
     """
     body = {
         "InstrumentID": int(intent.instrument_id),
@@ -342,6 +370,16 @@ async def close_trade(
 
     try:
         response = await http.request("POST", path, json=body)
+    except AuthError as exc:
+        if raise_auth:
+            raise
+        return _failed_result(
+            intent,
+            intent.instrument_id,
+            intent.units_to_deduct,
+            status="failed",
+            error=f"401 (auth rejected this POST): {exc}",
+        )
     except HttpStatusError as exc:
         return _failed_result(
             intent,
@@ -379,6 +417,31 @@ async def close_trade(
         filled_amount=None,
         filled_units=intent.units_to_deduct,
     )
+
+
+async def close_trade(
+    http: HttpClient,
+    *,
+    env: Environment,
+    intent: CloseIntent,
+) -> TradeResult:
+    """Execute a single full or partial close by ``position_id``.
+
+    ``UnitsToDeduct: null`` performs a full close; a positive value performs
+    a partial close. The position lookup is the caller's responsibility —
+    typically read from :class:`AccountSnapshot.positions`.
+
+    The eToro close endpoint requires both the position ID in the URL **and**
+    the matching ``InstrumentID`` in the body as a server-side cross-check;
+    omitting it returns ``HTTP 400 -- InstrumentId: The instrument id does
+    not exist``. :class:`CloseIntent` enforces both fields.
+
+    For single-trade callers, an ``AuthError`` propagates so the caller can
+    decide whether to surface a re-auth flow; the parallel close path used
+    by :func:`rebalance` Phase 1 calls :func:`_execute_one_close` directly
+    with ``raise_auth=False`` so the gather() doesn't cancel siblings.
+    """
+    return await _execute_one_close(http, env=env, intent=intent, raise_auth=True)
 
 
 # ── bulk trade ─────────────────────────────────────────────────────────────
@@ -451,14 +514,30 @@ async def _execute_one_open(
     leverage: int,
     pre_existing_position_ids: tuple[PositionID, ...] = (),
 ) -> TradeResult:
-    """Single open-by-amount POST inside a bulk loop.
+    """Single open-by-amount POST for use inside a concurrent bulk gather().
 
-    Distinct from :func:`open_trade` because the bulk loop has already done
-    the pre-flight cash + open-buffer math; we just send the POST and
-    classify. ``pre_existing_position_ids`` is captured by the caller from
-    the anchor snapshot and threaded through to the resulting
-    :class:`TradeResult` so verification can identify the new position
-    unambiguously.
+    Distinct from :func:`open_trade` because the bulk caller has already
+    done the pre-flight cash + open-buffer math; we just send the POST and
+    classify per the eToro at-most-once decision table (see the
+    ``etoro-api-conventions`` rule § "Trade-execution endpoints have NO
+    idempotency key"):
+
+    * 2xx → ``ok``
+    * HTTP 4xx (other than 429/401) → ``failed``
+    * 401 → ``failed`` with explicit note. NOT re-raised — we run inside
+      ``asyncio.gather(return_exceptions=False)`` and re-raising would
+      cancel sibling open-POSTs that are already in flight. Cancellation
+      mid-send is *ambiguous* (the trade may have reached the server and
+      executed before the cancel landed); at-most-once forbids creating
+      ambiguity we don't have to. The caller can detect a 401 outcome by
+      filtering ``trades`` for ``error`` strings starting with ``"401"``.
+    * 429 after retries → ``rate_limited_giveup``
+    * Timeout / connection reset → ``ambiguous`` (verifier reconciles
+      via ``/pnl``).
+
+    ``pre_existing_position_ids`` is captured by the caller from the
+    anchor snapshot and threaded through so verification can identify
+    the new position unambiguously.
     """
     body = {
         "InstrumentID": int(instrument_id),
@@ -469,10 +548,17 @@ async def _execute_one_open(
     path = f"/trading/execution/{env}/market-open-orders/by-amount"
     try:
         response = await http.request("POST", path, json=body)
-    except AuthError:
-        # 401 → bubble up so the bulk loop can stop the entire batch and
-        # surface a partial-state report (per execution-invariants §4).
-        raise
+    except AuthError as exc:
+        # See docstring: do NOT re-raise inside a gather() — would cancel
+        # in-flight siblings and create at-most-once-violating ambiguity.
+        return _failed_result(
+            intent,
+            instrument_id,
+            requested_amount,
+            status="failed",
+            error=f"401 (auth rejected this POST): {exc}",
+            pre_existing_position_ids=pre_existing_position_ids,
+        )
     except HttpStatusError as exc:
         return _failed_result(
             intent,
@@ -596,97 +682,49 @@ async def execute_bulk_trade(
             summary=_summarize_bulk(tuple(synthetic_trades), total_planned=total_planned),
         )
 
-    spent_so_far = Decimal(0)
-    trades: list[TradeResult] = []
-    auth_error: AuthError | None = None
-
+    # Build the per-key open intents up front so we can fire them all
+    # concurrently. No sequential cumulative ``spent_so_far`` check: the
+    # plan's ``total_amount`` is already validated against ``cash_anchor``
+    # above, and per-trade sizing is deterministic from the anchor — every
+    # POST is independent. If something *between* the snapshot and the
+    # POSTs eats cash (another process), eToro will return per-trade 400s,
+    # which the at-most-once classifier records as ``failed`` without
+    # poisoning the rest of the batch.
     keys = list(plan.weights.keys())
-    for idx, key in enumerate(keys):
-        ref = refs[key]
-        amt = amounts[key]
-        pre_pids = pre_pids_by_key[key]
-
-        if auth_error is not None:
-            # 401 already hit; mark every remaining trade as not-attempted.
-            intent = OpenIntent(
-                instrument=key,
-                amount=amt,
-                is_buy=plan.is_buy,
-                leverage=plan.leverage,
-            )
-            trades.append(
-                _failed_result(
-                    intent,
-                    ref.instrument_id,
-                    amt,
-                    status="failed",
-                    error="not attempted (workflow stopped after upstream 401)",
-                    pre_existing_position_ids=pre_pids,
-                )
-            )
-            continue
-
-        # Cumulative ceiling check — should never fire for a valid plan, but
-        # surface as failed if it does so the user sees the bug.
-        if spent_so_far + amt > total_planned + CENT or spent_so_far + amt > cash_anchor:
-            intent = OpenIntent(
-                instrument=key,
-                amount=amt,
-                is_buy=plan.is_buy,
-                leverage=plan.leverage,
-            )
-            trades.append(
-                _failed_result(
-                    intent,
-                    ref.instrument_id,
-                    amt,
-                    status="failed",
-                    error=(
-                        f"cumulative ceiling violated at index {idx}: "
-                        f"spent={spent_so_far} + next={amt} > planned={total_planned}"
-                    ),
-                    pre_existing_position_ids=pre_pids,
-                )
-            )
-            continue
-
-        intent = OpenIntent(
+    intents: dict[str | int, OpenIntent] = {
+        key: OpenIntent(
             instrument=key,
-            amount=amt,
+            amount=amounts[key],
             is_buy=plan.is_buy,
             leverage=plan.leverage,
         )
-        try:
-            tr = await _execute_one_open(
+        for key in keys
+    }
+
+    # asyncio.gather fans out all POSTs onto the shared rate-limiter
+    # (20 rpm execution); concurrent acquires serialize cleanly inside
+    # the limiter. We deliberately do NOT use ``return_exceptions=True``
+    # AND deliberately fold 401 into a per-trade ``failed`` inside
+    # _execute_one_open — both of those exist to preserve at-most-once:
+    # cancelling a sibling POST mid-send creates ambiguity we can't
+    # reconcile (the trade may have reached the server and executed).
+    trades = await asyncio.gather(
+        *(
+            _execute_one_open(
                 http,
                 env=env,
-                intent=intent,
-                instrument_id=ref.instrument_id,
-                requested_amount=amt,
+                intent=intents[key],
+                instrument_id=refs[key].instrument_id,
+                requested_amount=amounts[key],
                 is_buy=plan.is_buy,
                 leverage=plan.leverage,
-                pre_existing_position_ids=pre_pids,
+                pre_existing_position_ids=pre_pids_by_key[key],
             )
-        except AuthError as exc:
-            # Stop the batch.
-            auth_error = exc
-            trades.append(
-                _failed_result(
-                    intent,
-                    ref.instrument_id,
-                    amt,
-                    status="failed",
-                    error=f"401 stopped the batch: {exc}",
-                    pre_existing_position_ids=pre_pids,
-                )
-            )
-            continue
+            for key in keys
+        )
+    )
 
-        trades.append(tr)
-        if tr.status in ("ok", "filled"):
-            spent_so_far += amt
-
-    result = BulkTradeResult(
+    return BulkTradeResult(
         plan=plan,
         env=env,
         equity_anchor=equity_anchor,
@@ -695,16 +733,6 @@ async def execute_bulk_trade(
         trades=tuple(trades),
         summary=_summarize_bulk(tuple(trades), total_planned=total_planned),
     )
-
-    if auth_error is not None:
-        # Bubble the AuthError but attach the partial result so the SDK
-        # surface can decide how to present it. We do NOT raise here so the
-        # caller can inspect the result; instead the orchestration layer in
-        # client.py is responsible for raising if it sees auth-related
-        # failures in the summary.
-        pass
-
-    return result
 
 
 # ── rebalance ──────────────────────────────────────────────────────────────
@@ -903,29 +931,45 @@ async def rebalance(
             summary=_summarize_rebalance(diff, (), ()),
         )
 
-    # Phase 1 — closes / reduces.
-    phase_1: list[TradeResult] = []
+    # Phase 1 — closes / reduces, fired concurrently.
+    #
+    # All closes from the diff are independent (each targets a distinct
+    # ``positionID``); we fire them as one ``asyncio.gather`` to compress
+    # wall-clock from O(N) round-trips to O(1) round-trips + whatever the
+    # 20 rpm execution rate-limiter forces. ``_execute_one_close`` with
+    # ``raise_auth=False`` folds 401 into a per-trade ``failed`` so a
+    # single bad credential can't cancel sibling closes (which would
+    # leave the SDK in a half-closed state that violates at-most-once on
+    # the trades already in flight).
+    close_intents: list[CloseIntent] = []
     for delta in diff:
         if delta.action not in ("close", "reduce"):
             continue
         amount_to_free = -delta.delta_amount  # positive
-        plans = _select_positions_for_close(
+        for position_id, units in _select_positions_for_close(
             pre_snap,
             delta.instrument.instrument_id,
             amount_to_free=amount_to_free,
             close_buffer_pct=plan.close_buffer_pct,
-        )
-        for position_id, units in plans:
-            close_intent = CloseIntent(
-                position_id=position_id,
-                instrument_id=delta.instrument.instrument_id,
-                units_to_deduct=units,
+        ):
+            close_intents.append(
+                CloseIntent(
+                    position_id=position_id,
+                    instrument_id=delta.instrument.instrument_id,
+                    units_to_deduct=units,
+                )
             )
-            try:
-                tr = await close_trade(http, env=env, intent=close_intent)
-            except AuthError:
-                raise
-            phase_1.append(tr)
+
+    phase_1: tuple[TradeResult, ...] = ()
+    if close_intents:
+        phase_1 = tuple(
+            await asyncio.gather(
+                *(
+                    _execute_one_close(http, env=env, intent=ci, raise_auth=False)
+                    for ci in close_intents
+                )
+            )
+        )
 
     # Wait for PnL cache + re-read.
     if phase_1:
@@ -947,9 +991,9 @@ async def rebalance(
             equity_anchor=equity_anchor,
             cash_anchor=cash_anchor,
             diff=diff,
-            phase_1_closes=tuple(phase_1),
+            phase_1_closes=phase_1,
             phase_2_opens=(),
-            summary=_summarize_rebalance(diff, tuple(phase_1), ()),
+            summary=_summarize_rebalance(diff, phase_1, ()),
         )
         err = RebalanceCashShortfallError(
             requested=opens_budget,
@@ -963,69 +1007,47 @@ async def rebalance(
         err.partial = partial  # type: ignore[attr-defined]
         raise err
 
-    # Phase 2 — opens / increases.
-    phase_2: list[TradeResult] = []
-    spent_so_far = Decimal(0)
+    # Phase 2 — opens / increases, fired concurrently for the same
+    # reasons as Phase 1 (see comment above) and as
+    # :func:`execute_bulk_trade`. Pre-existing PIDs come from the
+    # post-close ``settled`` snapshot so the verifier doesn't
+    # mis-attribute a brand-new Phase-2 fill to a position that
+    # survived Phase 1. The ``opens_budget`` total has already been
+    # validated against ``settled.available_cash`` above; per-trade
+    # cumulative checks would be redundant in the concurrent model.
+    open_args: list[tuple[OpenIntent, InstrumentID, Decimal, tuple[PositionID, ...]]] = []
     for delta in diff:
         if delta.action not in ("open", "increase"):
             continue
         amt = floor_cents(delta.delta_amount)
-        # Pre-existing PIDs come from the post-close snapshot so we don't
-        # mis-attribute a brand-new Phase-2 fill to a position that
-        # survived Phase 1.
         pre_pids = _collect_pre_existing_pids(settled, delta.instrument.instrument_id)
-        if spent_so_far + amt > settled.available_cash:
-            phase_2.append(
-                _failed_result(
-                    OpenIntent(
-                        instrument=delta.instrument.symbol or int(delta.instrument.instrument_id),
-                        amount=amt,
-                        is_buy=plan.is_buy,
-                        leverage=plan.leverage,
-                    ),
-                    delta.instrument.instrument_id,
-                    amt,
-                    status="failed",
-                    error=(
-                        "cumulative cash check failed in Phase 2: "
-                        f"spent={spent_so_far} + next={amt} > available={settled.available_cash}"
-                    ),
-                    pre_existing_position_ids=pre_pids,
-                )
-            )
-            continue
         intent = OpenIntent(
             instrument=delta.instrument.symbol or int(delta.instrument.instrument_id),
             amount=amt,
             is_buy=plan.is_buy,
             leverage=plan.leverage,
         )
-        try:
-            tr = await _execute_one_open(
-                http,
-                env=env,
-                intent=intent,
-                instrument_id=delta.instrument.instrument_id,
-                requested_amount=amt,
-                is_buy=plan.is_buy,
-                leverage=plan.leverage,
-                pre_existing_position_ids=pre_pids,
-            )
-        except AuthError:
-            phase_2.append(
-                _failed_result(
-                    intent,
-                    delta.instrument.instrument_id,
-                    amt,
-                    status="failed",
-                    error="401 stopped Phase 2",
-                    pre_existing_position_ids=pre_pids,
+        open_args.append((intent, delta.instrument.instrument_id, amt, pre_pids))
+
+    phase_2: tuple[TradeResult, ...] = ()
+    if open_args:
+        phase_2 = tuple(
+            await asyncio.gather(
+                *(
+                    _execute_one_open(
+                        http,
+                        env=env,
+                        intent=intent,
+                        instrument_id=iid,
+                        requested_amount=amt,
+                        is_buy=plan.is_buy,
+                        leverage=plan.leverage,
+                        pre_existing_position_ids=pre_pids,
+                    )
+                    for intent, iid, amt, pre_pids in open_args
                 )
             )
-            break
-        phase_2.append(tr)
-        if tr.status in ("ok", "filled"):
-            spent_so_far += amt
+        )
 
     return RebalanceResult(
         plan=plan,
@@ -1033,9 +1055,9 @@ async def rebalance(
         equity_anchor=equity_anchor,
         cash_anchor=cash_anchor,
         diff=diff,
-        phase_1_closes=tuple(phase_1),
-        phase_2_opens=tuple(phase_2),
-        summary=_summarize_rebalance(diff, tuple(phase_1), tuple(phase_2)),
+        phase_1_closes=phase_1,
+        phase_2_opens=phase_2,
+        summary=_summarize_rebalance(diff, phase_1, phase_2),
     )
 
 

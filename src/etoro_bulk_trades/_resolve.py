@@ -26,6 +26,7 @@ directions (symbol → ref, id → ref) populate together so the next
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -155,6 +156,40 @@ async def _resolve_symbol(
     return _ref_from_search_item(chosen)
 
 
+async def _fetch_ids_chunk(
+    http: HttpClient,
+    chunk: list[int],
+    *,
+    start_batch_size: int,
+) -> tuple[list[InstrumentRef], int]:
+    """Fetch one chunk of IDs; on 413/414 shrink and recurse.
+
+    Returns ``(refs_in_chunk, remaining_chunk_size_to_use)``. The caller
+    handles re-chunking the rest of the list with the new size. 429 / 5xx
+    are NOT swallowed here — the HTTP layer's typed retry/backoff
+    (:data:`etoro_bulk_trades._http.GENERAL_429_BACKOFF_S`) owns those.
+    """
+    from etoro_bulk_trades._http import instruments_url
+
+    batch_size = start_batch_size
+    while True:
+        try:
+            body = await http.request(
+                "GET",
+                "",
+                absolute_url=instruments_url(chunk[:batch_size]),
+            )
+        except PayloadTooLargeError:
+            ladder_idx = BATCH_LADDER.index(batch_size)
+            if ladder_idx + 1 < len(BATCH_LADDER):
+                batch_size = BATCH_LADDER[ladder_idx + 1]
+                chunk = chunk[:batch_size]
+                continue
+            return [], batch_size  # already at min; let caller drop
+        items = body.get("instrumentDisplayDatas") if isinstance(body, dict) else None
+        return ([_ref_from_metadata_item(it) for it in items] if items else []), batch_size
+
+
 async def _resolve_ids_batch(
     http: HttpClient,
     ids: list[int],
@@ -166,39 +201,27 @@ async def _resolve_ids_batch(
     handled by the HTTP layer's retry/backoff and never trigger a shrink
     (that would hide real rate-limit problems behind sizes that succeed by
     accident).
-    """
-    # Local import to dodge the http → resolve cycle when types.py is loaded.
-    from etoro_bulk_trades._http import instruments_url
 
+    Multiple batches run **concurrently** — the per-client rate limiter
+    (60 rpm general) serializes the underlying HTTP sends when contention
+    is high, so parallel `asyncio.gather` here is safe even for thousands
+    of IDs. The HTTP layer retries 429s with the documented backoff
+    (1s / 5s / 30s, three attempts) before bubbling
+    :class:`RateLimitError`.
+    """
     if not ids:
         return []
 
-    out: list[InstrumentRef] = []
+    # Build chunks at the starting batch size; per-chunk shrink is handled
+    # inside _fetch_ids_chunk for the rare 413/414 cases.
     batch_size = BATCH_LADDER[0]
-    i = 0
-
-    while i < len(ids):
-        chunk = ids[i : i + batch_size]
-        try:
-            body = await http.request(
-                "GET",
-                "",  # ignored when absolute_url is set
-                absolute_url=instruments_url(chunk),
-            )
-        except PayloadTooLargeError:
-            ladder_idx = BATCH_LADDER.index(batch_size)
-            if ladder_idx + 1 < len(BATCH_LADDER):
-                batch_size = BATCH_LADDER[ladder_idx + 1]
-                continue
-            # Already at minimum — skip and let the caller surface the miss.
-            i += batch_size
-            continue
-
-        items = body.get("instrumentDisplayDatas") if isinstance(body, dict) else None
-        if items:
-            out.extend(_ref_from_metadata_item(it) for it in items)
-        i += batch_size
-
+    chunks = [ids[i : i + batch_size] for i in range(0, len(ids), batch_size)]
+    results = await asyncio.gather(
+        *(_fetch_ids_chunk(http, chunk, start_batch_size=batch_size) for chunk in chunks)
+    )
+    out: list[InstrumentRef] = []
+    for refs, _ in results:
+        out.extend(refs)
     return out
 
 
@@ -253,13 +276,24 @@ async def resolve(
         else:
             pending_ids.append(iid)
 
-    # Live-resolve symbols sequentially (each is one cheap GET; parallelism
-    # would burn the 60 rpm budget).
-    for sym in pending_symbols:
-        ref = await _resolve_symbol(http, sym, force_exact=force_exact)
-        if ref is not None:
-            cache.put(ref)
-            out[sym] = ref
+    # Live-resolve symbols **concurrently**. The per-client rate limiter
+    # (60 rpm general) serializes the underlying HTTP sends when the
+    # window is saturated, and the HTTP layer's typed 429 backoff
+    # (1s / 5s / 30s, up to 3 retries — see
+    # :data:`etoro_bulk_trades._http.GENERAL_429_BACKOFF_S`) is the
+    # fallback if eToro returns 429 anyway under bursty load. This keeps
+    # bulk resolves linear in symbol count *budget* but sub-linear in
+    # wall-clock for typical sizes (≤60 symbols all fly in parallel and
+    # complete in one round-trip; larger sets queue inside the limiter).
+    # Per https://api-portal.etoro.com/getting-started/rate-limits.
+    if pending_symbols:
+        symbol_refs = await asyncio.gather(
+            *(_resolve_symbol(http, sym, force_exact=force_exact) for sym in pending_symbols)
+        )
+        for sym, ref in zip(pending_symbols, symbol_refs, strict=True):
+            if ref is not None:
+                cache.put(ref)
+                out[sym] = ref
 
     # Batched ID resolution.
     if pending_ids:
