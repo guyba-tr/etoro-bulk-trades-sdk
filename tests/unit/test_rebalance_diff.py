@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from etoro_bulk_trades._execute import _build_diff, _select_positions_for_close
+from etoro_bulk_trades._rebalance_planning import (
+    build_diff as _build_diff,
+)
+from etoro_bulk_trades._rebalance_planning import (
+    select_positions_for_close as _select_positions_for_close,
+)
 from etoro_bulk_trades.types import (
     AccountSnapshot,
     InstrumentID,

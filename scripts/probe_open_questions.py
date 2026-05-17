@@ -47,7 +47,10 @@ from etoro_bulk_trades._auth import (
     probe_environment,
 )
 from etoro_bulk_trades._http import HttpClient
-from etoro_bulk_trades._resolve import InstrumentCache, resolve
+from etoro_bulk_trades._instrument_resolution import (
+    InstrumentCache,
+    resolve_instruments,
+)
 from etoro_bulk_trades.errors import HttpStatusError
 
 PROBE_SYMBOL = "AAPL"
@@ -58,7 +61,7 @@ async def probe_a1(http: HttpClient, env: str) -> None:
     """A1 — confirm the casing of the ``InstrumentID`` request body field."""
     print("\n── A1: trade-execution InstrumentID casing")
     cache = InstrumentCache()
-    refs = await resolve(http, [PROBE_SYMBOL], cache=cache)
+    refs = await resolve_instruments(http, [PROBE_SYMBOL], cache=cache)
     instrument_id = int(refs[PROBE_SYMBOL].instrument_id)
     print(f"   AAPL → instrument_id={instrument_id}")
 

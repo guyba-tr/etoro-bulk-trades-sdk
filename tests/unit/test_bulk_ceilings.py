@@ -6,12 +6,12 @@ from decimal import Decimal
 
 import pytest
 
-from etoro_bulk_trades._execute import (
+from etoro_bulk_trades._sizing import (
     OPEN_BUFFER_FACTOR,
     OPEN_BUFFER_THRESHOLD,
-    _size_bulk_amounts,
     ceil_cents,
     floor_cents,
+    size_bulk_amounts,
 )
 from etoro_bulk_trades.types import BulkTradePlan
 
@@ -34,7 +34,7 @@ def test_bulk_sizing_no_buffer() -> None:
         weights={"AAPL": Decimal("0.5"), "MSFT": Decimal("0.3"), "GOOG": Decimal("0.2")},
         total_amount=Decimal("1000"),
     )
-    amts, buffer = _size_bulk_amounts(
+    amts, buffer = size_bulk_amounts(
         plan, equity_anchor=Decimal("2000"), cash_anchor=Decimal("2000")
     )
     assert amts == {
@@ -51,7 +51,7 @@ def test_bulk_sizing_open_buffer_fires_when_cash_drops_below_1pct() -> None:
         weights={"AAPL": Decimal("0.5"), "MSFT": Decimal("0.3"), "GOOG": Decimal("0.2")},
         total_amount=Decimal("995"),
     )
-    amts, buffer = _size_bulk_amounts(
+    amts, buffer = size_bulk_amounts(
         plan, equity_anchor=Decimal("1000"), cash_anchor=Decimal("1000")
     )
     assert buffer is True
@@ -69,7 +69,7 @@ def test_bulk_sizing_buffer_constants_documented() -> None:
 
 def test_bulk_sizing_uneven_floor() -> None:
     plan = BulkTradePlan(weights={"AAPL": Decimal("0.333")}, total_amount=Decimal("100"))
-    amts, _ = _size_bulk_amounts(plan, equity_anchor=Decimal("1000"), cash_anchor=Decimal("1000"))
+    amts, _ = size_bulk_amounts(plan, equity_anchor=Decimal("1000"), cash_anchor=Decimal("1000"))
     assert amts["AAPL"] == Decimal("33.30")
 
 
@@ -89,5 +89,5 @@ def test_bulk_sizing_buffer_threshold_boundary(
     expected_buffer: bool,
 ) -> None:
     plan = BulkTradePlan(weights={"X": weight}, total_amount=total)
-    _, buffer = _size_bulk_amounts(plan, equity_anchor=equity, cash_anchor=cash)
+    _, buffer = size_bulk_amounts(plan, equity_anchor=equity, cash_anchor=cash)
     assert buffer is expected_buffer

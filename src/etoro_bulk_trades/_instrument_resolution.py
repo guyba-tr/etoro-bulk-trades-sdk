@@ -1,6 +1,13 @@
-"""Bidirectional instrument resolver.
+"""Bidirectional instrument resolution.
 
-Two paths under one ``resolve()`` call:
+The name ``resolve`` on its own is ambiguous (people resolve symbols,
+URLs, IDs, promises, …); this module is specifically about turning a
+user-supplied ``symbol`` or ``instrument_id`` into a fully-populated
+:class:`InstrumentRef`. The public surface is therefore named
+:func:`resolve_instruments` and :class:`InstrumentResolutionError` —
+the verbose form is the contract.
+
+Two paths under one :func:`resolve_instruments` call:
 
 * **Symbol → metadata** — ``GET /market-data/search?internalSymbolFull={SYMBOL}``
   per symbol. The response array can contain partial matches
@@ -21,7 +28,7 @@ Caching
 -------
 Resolutions are cached in a per-client :class:`InstrumentCache`. Both
 directions (symbol → ref, id → ref) populate together so the next
-``resolve()`` short-circuits.
+:func:`resolve_instruments` call short-circuits.
 """
 
 from __future__ import annotations
@@ -32,8 +39,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from etoro_bulk_trades.errors import (
     HttpStatusError,
+    InstrumentResolutionError,
     PayloadTooLargeError,
-    ResolutionError,
 )
 from etoro_bulk_trades.types import InstrumentID, InstrumentImage, InstrumentRef
 
@@ -145,9 +152,10 @@ async def _resolve_symbol(
         return None
 
     # Exact match first; fall back to the first hit if no exact match (rare,
-    # but better than failing the whole resolve when the user gave an
-    # unambiguous symbol that just doesn't have an exact field — we surface
-    # via ResolutionError later if it doesn't match the user's expectation).
+    # but better than failing the whole instrument-resolution when the user
+    # gave an unambiguous symbol that just doesn't have an exact field — we
+    # surface via InstrumentResolutionError later if it doesn't match the
+    # user's expectation).
     exact = next(
         (i for i in items if str(i.get("internalSymbolFull", "")).upper() == query.upper()),
         None,
@@ -225,7 +233,7 @@ async def _resolve_ids_batch(
     return out
 
 
-async def resolve(
+async def resolve_instruments(
     http: HttpClient,
     inputs: Iterable[str | int],
     *,
@@ -234,9 +242,9 @@ async def resolve(
 ) -> dict[str | int, InstrumentRef]:
     """Resolve a mix of symbols and instrument IDs to :class:`InstrumentRef`.
 
-    Returns a dict keyed by the **caller's input** (string symbols or int IDs
-    exactly as passed in). Raises :class:`ResolutionError` if any input
-    couldn't be resolved.
+    Returns a dict keyed by the **caller's input** (string symbols or int
+    IDs exactly as passed in). Raises :class:`InstrumentResolutionError`
+    if any input couldn't be resolved.
     """
     deduped: list[str | int] = []
     seen: set[str | int] = set()
@@ -257,7 +265,9 @@ async def resolve(
             except ValueError:
                 symbols.append(x)
         else:
-            raise TypeError(f"resolve() inputs must be str or int, got {type(x).__name__}")
+            raise TypeError(
+                f"resolve_instruments() inputs must be str or int, got {type(x).__name__}"
+            )
 
     # Cache hits short-circuit.
     out: dict[str | int, InstrumentRef] = {}
@@ -315,6 +325,6 @@ async def resolve(
             unresolved.append(x)
 
     if unresolved:
-        raise ResolutionError(unresolved=tuple(unresolved))
+        raise InstrumentResolutionError(unresolved=tuple(unresolved))
 
     return result

@@ -114,8 +114,9 @@ class HttpStatusError(EtoroSDKError):
 # ── planning ────────────────────────────────────────────────────────────────
 
 
-class ResolutionError(EtoroSDKError):
-    """One or more symbols / instrument IDs could not be resolved."""
+class InstrumentResolutionError(EtoroSDKError):
+    """One or more symbols / instrument IDs could not be resolved to a
+    fully-populated :class:`~etoro_bulk_trades.types.InstrumentRef`."""
 
     def __init__(
         self,

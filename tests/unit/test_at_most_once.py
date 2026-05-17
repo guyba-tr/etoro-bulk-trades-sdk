@@ -11,7 +11,7 @@ from httpx import Response
 from etoro_bulk_trades._auth import ApiKeyAuth, AuthHandle
 from etoro_bulk_trades._execute import open_trade
 from etoro_bulk_trades._http import HttpClient
-from etoro_bulk_trades._resolve import InstrumentCache
+from etoro_bulk_trades._instrument_resolution import InstrumentCache
 from etoro_bulk_trades.types import InstrumentID, InstrumentRef, OpenIntent
 
 PUBLIC_BASE = "https://public-api.etoro.com/api/v1"

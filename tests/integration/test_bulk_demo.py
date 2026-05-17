@@ -30,7 +30,7 @@ async def test_bulk_three_small_crypto_positions(demo_client: AsyncBulkTradesCli
     # cleanup loop only closes positions THIS test opened. Closing
     # pre-existing positions is the bug class fixed in commit history
     # (was: cleanup matched by instrument_id without a pre/post diff).
-    refs = await demo_client.resolve(list(symbols))
+    refs = await demo_client.resolve_instruments(list(symbols))
     target_ids = {int(refs[s].instrument_id) for s in symbols}
     pre_snap = await demo_client.get_account()
     pre_pids_by_iid: dict[int, set[int]] = {iid: set() for iid in target_ids}

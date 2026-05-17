@@ -33,16 +33,16 @@ jobs:
         run: uv sync --extra dev --python ${{ matrix.python }}
 
       - name: Ruff lint
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
 
       - name: Ruff format check
-        run: uv run ruff format --check .
+        run: uv run --no-sync ruff format --check .
 
       - name: mypy --strict
-        run: uv run mypy
+        run: uv run --no-sync mypy
 
       - name: pytest (unit)
-        run: uv run pytest tests/unit -v
+        run: uv run --no-sync pytest tests/unit -v
 
   integration-demo:
     name: integration (demo)
@@ -67,4 +67,4 @@ jobs:
         env:
           ETORO_DEMO_API_KEY: ${{ secrets.ETORO_DEMO_API_KEY }}
           ETORO_DEMO_USER_KEY: ${{ secrets.ETORO_DEMO_USER_KEY }}
-        run: uv run pytest tests/integration -v -m integration
+        run: uv run --no-sync pytest tests/integration -v -m integration

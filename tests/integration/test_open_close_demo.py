@@ -30,7 +30,7 @@ async def test_open_then_close_single_btc_position(
     demo_client: AsyncBulkTradesClient,
 ) -> None:
     # Resolve BTC first so we know which instrument_id to filter on.
-    refs = await demo_client.resolve(["BTC"])
+    refs = await demo_client.resolve_instruments(["BTC"])
     btc_id = int(refs["BTC"].instrument_id)
 
     pre_snap = await demo_client.get_account()

@@ -10,8 +10,11 @@ from httpx import Response
 
 from etoro_bulk_trades._auth import ApiKeyAuth, AuthHandle
 from etoro_bulk_trades._http import HttpClient
-from etoro_bulk_trades._resolve import InstrumentCache, resolve
-from etoro_bulk_trades.errors import ResolutionError
+from etoro_bulk_trades._instrument_resolution import (
+    InstrumentCache,
+    resolve_instruments,
+)
+from etoro_bulk_trades.errors import InstrumentResolutionError
 
 PUBLIC_BASE = "https://public-api.etoro.com/api/v1"
 
@@ -55,7 +58,7 @@ async def test_symbol_uppercased_by_default() -> None:
 
         router.get(f"{PUBLIC_BASE}/market-data/search").mock(side_effect=capture)
 
-        out = await resolve(http, ["aapl"], cache=cache)
+        out = await resolve_instruments(http, ["aapl"], cache=cache)
 
     assert "internalSymbolFull=AAPL" in seen_queries[0]
     assert int(out["aapl"].instrument_id) == 1001
@@ -87,7 +90,7 @@ async def test_force_exact_preserves_input_case() -> None:
 
         router.get(f"{PUBLIC_BASE}/market-data/search").mock(side_effect=capture)
 
-        await resolve(http, ["lowercase"], cache=cache, force_exact=True)
+        await resolve_instruments(http, ["lowercase"], cache=cache, force_exact=True)
 
     assert "internalSymbolFull=lowercase" in seen[0]
     await http.aclose()
@@ -115,7 +118,7 @@ async def test_ids_use_literal_comma_url() -> None:
 
         router.get(host="public-api.etoro.com").mock(side_effect=capture)
 
-        await resolve(http, [1, 2], cache=cache)
+        await resolve_instruments(http, [1, 2], cache=cache)
 
     assert any("instrumentIds=1,2" in u for u in seen_urls), seen_urls
     assert not any("instrumentIds=1%2C2" in u for u in seen_urls), seen_urls
@@ -132,8 +135,8 @@ async def test_resolution_error_lists_unresolved() -> None:
             return_value=Response(200, json={"items": []})
         )
 
-        with pytest.raises(ResolutionError) as exc:
-            await resolve(http, ["NOPE"], cache=cache)
+        with pytest.raises(InstrumentResolutionError) as exc:
+            await resolve_instruments(http, ["NOPE"], cache=cache)
         assert "NOPE" in exc.value.unresolved
     await http.aclose()
 
@@ -174,7 +177,7 @@ async def test_symbol_searches_run_concurrently() -> None:
 
     with respx.mock(assert_all_called=True) as router:
         router.get(f"{PUBLIC_BASE}/market-data/search").mock(side_effect=slow_handler)
-        out = await resolve(http, ["BTC", "ETH", "XRP"], cache=cache)
+        out = await resolve_instruments(http, ["BTC", "ETH", "XRP"], cache=cache)
 
     assert len(out) == 3
     assert peak_in_flight[0] >= 2, (
@@ -220,7 +223,7 @@ async def test_id_batches_run_concurrently() -> None:
         router.get(host="public-api.etoro.com").mock(side_effect=slow_handler)
         # 120 IDs → 3 batches of 50 / 50 / 20 at the starting ladder size.
         ids: list[str | int] = list(range(1, 121))
-        out = await resolve(http, ids, cache=cache)
+        out = await resolve_instruments(http, ids, cache=cache)
 
     assert len(out) == 120
     assert peak_in_flight[0] >= 2, (
@@ -262,7 +265,7 @@ async def test_rate_limit_429_is_retried_then_succeeds() -> None:
 
     with respx.mock(assert_all_called=True) as router:
         router.get(f"{PUBLIC_BASE}/market-data/search").mock(side_effect=handler)
-        out = await resolve(http, ["BTC", "ETH", "XRP"], cache=cache)
+        out = await resolve_instruments(http, ["BTC", "ETH", "XRP"], cache=cache)
 
     assert set(out.keys()) == {"BTC", "ETH", "XRP"}
     assert call_counts["ETH"] == 2, (
@@ -296,8 +299,8 @@ async def test_cache_hits_avoid_network() -> None:
             )
 
         router.get(f"{PUBLIC_BASE}/market-data/search").mock(side_effect=capture)
-        await resolve(http, ["AAPL"], cache=cache)
-        await resolve(http, ["AAPL"], cache=cache)  # cache hit, no HTTP
+        await resolve_instruments(http, ["AAPL"], cache=cache)
+        await resolve_instruments(http, ["AAPL"], cache=cache)  # cache hit, no HTTP
 
     assert calls == 1
     await http.aclose()

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "etoro-bulk-trades-sdk"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Async-first Python SDK for the eToro Public API: single trades, bulk trading, rebalancing, WebSocket-first verification."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,6 +44,9 @@ dev = [
 Homepage = "https://github.com/guyba-tr/etoro-bulk-trades-sdk"
 Issues = "https://github.com/guyba-tr/etoro-bulk-trades-sdk/issues"
 "eToro API Portal" = "https://api-portal.etoro.com/"
+
+[tool.hatch.version]
+path = "src/etoro_bulk_trades/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/etoro_bulk_trades"]

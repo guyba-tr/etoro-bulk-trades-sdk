@@ -32,9 +32,13 @@ from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING, cast
 
-from etoro_bulk_trades._account import build_snapshot
-from etoro_bulk_trades._execute import _summarize_bulk, _summarize_rebalance
-from etoro_bulk_trades.errors import EtoroSDKError
+from etoro_bulk_trades._pnl import (
+    PNL_CACHE_WINDOW_S,
+    classify_positions,
+    read_snapshot,
+)
+from etoro_bulk_trades._summary import summarize_bulk, summarize_rebalance
+from etoro_bulk_trades.errors import EtoroSDKError, TransportError
 from etoro_bulk_trades.types import (
     BulkTradeResult,
     Environment,
@@ -53,8 +57,6 @@ if TYPE_CHECKING:
 SleepFn = Callable[[float], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
-
-PNL_CACHE_WINDOW_S: float = 10.0
 
 
 def _expected_order_ids(trades: tuple[TradeResult, ...]) -> set[int]:
@@ -122,32 +124,27 @@ async def _pnl_classify(
     *,
     env: Environment,
 ) -> tuple[set[int], set[int], dict[int, list[int]]]:
-    """Read ``/pnl`` and return ``(filled_instrument_ids, pending_order_ids,
-    instrument_to_position_ids)``.
-
-    The third element maps each ``instrument_id`` to the **list of all
-    non-mirror ``position_id`` values** the account currently holds for
-    that instrument. Callers that need to attribute a freshly-opened
-    position must subtract their pre-trade snapshot from the list to find
-    the new entry. Returning a list rather than a single id avoids the
-    silent-overwrite trap of a ``{iid: pid}`` dict comprehension when the
-    account holds multiple positions on the same instrument.
-
-    The 10s PnL cache wait is the responsibility of the caller (it's only
-    needed once for an entire verify run, not per trade).
+    """Read ``/pnl`` via :mod:`_pnl` and project into the
+    ``(filled_iids, pending_oids, iid_to_pids)`` shape the verifier
+    consumes. Returns three empty containers on transport failure so the
+    verifier falls back gracefully — at this layer, "no information"
+    must not raise.
     """
-    body = await http.request("GET", f"/trading/info/{env}/pnl", category="general")
-    if not isinstance(body, dict) or "clientPortfolio" not in body:
+    try:
+        snap = await read_snapshot(http, env)
+    except TransportError as exc:
+        # Match the legacy behaviour: a shape-mismatched /pnl response
+        # used to short-circuit to "no information"; the new _pnl module
+        # raises TransportError for that case. Verifier callers fall back
+        # to the WS-only / not_landed paths.
+        logger.info("PnL verify read failed (%s); returning empty classification.", exc)
         return set(), set(), {}
-    snap = build_snapshot(body["clientPortfolio"], env=env)
-    filled_iids: set[int] = {int(p.instrument_id) for p in snap.positions if not p.is_mirror}
-    pending_oids: set[int] = {int(o.order_id) for o in snap.pending_orders}
-    iid_to_pids: dict[int, list[int]] = {}
-    for p in snap.positions:
-        if p.is_mirror:
-            continue
-        iid_to_pids.setdefault(int(p.instrument_id), []).append(int(p.position_id))
-    return filled_iids, pending_oids, iid_to_pids
+    classified = classify_positions(snap)
+    return (
+        classified.filled_instrument_ids,
+        classified.pending_order_ids,
+        classified.instrument_to_position_ids,
+    )
 
 
 async def _verify_trades(
@@ -314,7 +311,7 @@ async def verify_orders(
         return result.model_copy(
             update={
                 "trades": verified,
-                "summary": _summarize_bulk(verified, total_planned=total_planned),
+                "summary": summarize_bulk(verified, total_planned=total_planned),
             }
         )
 
@@ -341,7 +338,7 @@ async def verify_orders(
             update={
                 "phase_1_closes": verified_closes,
                 "phase_2_opens": verified_opens,
-                "summary": _summarize_rebalance(result.diff, verified_closes, verified_opens),
+                "summary": summarize_rebalance(result.diff, verified_closes, verified_opens),
             }
         )
 

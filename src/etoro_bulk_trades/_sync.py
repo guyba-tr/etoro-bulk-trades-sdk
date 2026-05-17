@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from typing_extensions import Self
 
+from etoro_bulk_trades._idempotency import IdempotencyStore
 from etoro_bulk_trades.client import AsyncBulkTradesClient
 from etoro_bulk_trades.types import (
     AccountSnapshot,
@@ -94,8 +95,15 @@ class BulkTradesClient:
         user_key: str,
         *,
         api_key: str | None = None,
+        idempotency_store: IdempotencyStore | None = None,
     ) -> BulkTradesClient:
-        return cls(AsyncBulkTradesClient.from_api_key(user_key, api_key=api_key))
+        return cls(
+            AsyncBulkTradesClient.from_api_key(
+                user_key,
+                api_key=api_key,
+                idempotency_store=idempotency_store,
+            )
+        )
 
     @classmethod
     def from_bearer(
@@ -105,6 +113,7 @@ class BulkTradesClient:
         refresh_token: str | None = None,
         client_id: str | None = None,
         on_token_refresh: Callable[[TokenPair], None] | None = None,
+        idempotency_store: IdempotencyStore | None = None,
     ) -> BulkTradesClient:
         return cls(
             AsyncBulkTradesClient.from_bearer(
@@ -112,8 +121,18 @@ class BulkTradesClient:
                 refresh_token=refresh_token,
                 client_id=client_id,
                 on_token_refresh=on_token_refresh,
+                idempotency_store=idempotency_store,
             )
         )
+
+    @property
+    def idempotency_store(self) -> IdempotencyStore:
+        """See :attr:`AsyncBulkTradesClient.idempotency_store`."""
+        return self._inner.idempotency_store
+
+    @idempotency_store.setter
+    def idempotency_store(self, store: IdempotencyStore) -> None:
+        self._inner.idempotency_store = store
 
     # ── connection ────────────────────────────────────────────────────────
 
@@ -132,21 +151,33 @@ class BulkTradesClient:
     def get_account(self) -> AccountSnapshot:
         return self._submit(self._inner.get_account())
 
-    def resolve(
+    def resolve_instruments(
         self,
         symbols_or_ids: Iterable[str | int],
         *,
         force_exact: bool = False,
     ) -> dict[str | int, InstrumentRef]:
-        return self._submit(self._inner.resolve(symbols_or_ids, force_exact=force_exact))
+        return self._submit(
+            self._inner.resolve_instruments(symbols_or_ids, force_exact=force_exact)
+        )
 
     # ── single trade ──────────────────────────────────────────────────────
 
-    def open_trade(self, intent: OpenIntent) -> TradeResult:
-        return self._submit(self._inner.open_trade(intent))
+    def open_trade(
+        self,
+        intent: OpenIntent,
+        *,
+        idempotency_key: str | None = None,
+    ) -> TradeResult:
+        return self._submit(self._inner.open_trade(intent, idempotency_key=idempotency_key))
 
-    def close_trade(self, intent: CloseIntent) -> TradeResult:
-        return self._submit(self._inner.close_trade(intent))
+    def close_trade(
+        self,
+        intent: CloseIntent,
+        *,
+        idempotency_key: str | None = None,
+    ) -> TradeResult:
+        return self._submit(self._inner.close_trade(intent, idempotency_key=idempotency_key))
 
     # ── multi-trade ───────────────────────────────────────────────────────
 
@@ -158,6 +189,7 @@ class BulkTradesClient:
         auto_verify: bool = True,
         verify_mode: VerifyMode = "ws",
         verify_timeout_s: float = 30.0,
+        idempotency_key: str | None = None,
     ) -> BulkTradeResult:
         return self._submit(
             self._inner.execute_bulk_trade(
@@ -166,6 +198,7 @@ class BulkTradesClient:
                 auto_verify=auto_verify,
                 verify_mode=verify_mode,
                 verify_timeout_s=verify_timeout_s,
+                idempotency_key=idempotency_key,
             )
         )
 
@@ -177,6 +210,7 @@ class BulkTradesClient:
         auto_verify: bool = True,
         verify_mode: VerifyMode = "ws",
         verify_timeout_s: float = 30.0,
+        idempotency_key: str | None = None,
     ) -> RebalanceResult:
         return self._submit(
             self._inner.rebalance(
@@ -185,6 +219,7 @@ class BulkTradesClient:
                 auto_verify=auto_verify,
                 verify_mode=verify_mode,
                 verify_timeout_s=verify_timeout_s,
+                idempotency_key=idempotency_key,
             )
         )
 
